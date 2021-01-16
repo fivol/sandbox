@@ -8,11 +8,10 @@ from scrapy.exporters import JsonItemExporter, CsvItemExporter
 class QuotesSpider(scrapy.Spider):
     name = 'quotes'
     allowed_domains = ['quotes.toscrape.com']
-    # start_urls = ['http://quotes.toscrape.com/']
 
     custom_settings = {
         'ITEM_PIPELINES': {
-            pipelines.ClearItemPipline: 100,
+            pipelines.CleanItemPipline: 100,
             pipelines.UniqueItemsPipline: 200,
             pipelines.SplitExportersPipline: 300,
         },

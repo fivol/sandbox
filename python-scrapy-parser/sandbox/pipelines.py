@@ -23,13 +23,6 @@ from scrapy.exceptions import DropItem
 logger = logging.getLogger('mycustomlogger')
 
 
-def stripper(text: str, **kwargs) -> str:
-    """Leaves only english characters and digits (russion too)"""
-    text = re.sub(r'[^ a-zA-Z0-9а-яА-Я]*', '', text)
-    text = re.sub(r' |\t', ' ', text)
-    return text.strip()
-
-
 def create_folders(dirspath):
     """Creates nested folders"""
     if not Path(dirspath).exists():
@@ -59,28 +52,46 @@ class SqlitePipeline:
         self.session.add(Quote(**dict(item)))
 
 
-class ClearItemPipline:
-    """This pipeline deletes all not alphabetic chars in Items. 
-    Leaves only [a-zA-Z0-9а-яА-Я \n]"""
-    @classmethod
-    def serialize_value(cls, value):
-        """Prettify string values, lists and dicts. Use stripper to .strip str
-        And remove non alphabetic symbols"""
-        if isinstance(value, str):
-            return stripper(value)
-        if isinstance(value, list):
-            return [cls.serialize_value(item) for item in value]
-        if isinstance(value, dict):
-            return {
-                key: cls.serialize_value(item)
-                for key, item in value.items()
-            }
-        return None
+class CleanItemPipline:
+    """This pipeline prepares every field in Item
+        How to use it?
+        ...
+        name = scrapy.Field(strip=True, int=False, extract_number=True)
+        ....
+        Avaliable parameters:
+        strip (default True) - remove space symbols from begin and end of string
+    
+    """
+
+    @staticmethod
+    def _handle_field(value, **kwargs):
+        for func, arg in kwargs.items():
+            if func == 'strip' and arg:
+                value = value.strip()
+            if func == 'extract':
+                extract_schema = {
+                    'int': r'\d+',
+                    'float': r'\d+(\.|,)\d',
+                }
+                schema = extract_schema.get(arg)
+                if schema:
+                    value = re.search(schema, value).group(0)
+            if func == 'cast':
+                value = arg(value)
+
+        return value
 
     def process_item(self, item, spider):
         adapter = ItemAdapter(item)
-        serialized_value = self.serialize_value(adapter.asdict())
-        return item.__class__(serialized_value)
+        for field in adapter.field_names():
+            meta = adapter.get_field_meta(field)
+            value = adapter.get(field)
+            try:
+                adapter[field] = self._handle_field(value, **meta)
+            except:
+                logger.warn('Fail to prepare field: %s, value: %s', field, value)
+
+        return adapter.item
 
 
 class SplitExportersPipline:
@@ -140,9 +151,6 @@ class SplitExportersPipline:
             exporter.finish_exporting()
             file.close()
 
-    def _export_item(self, item, exporter):
-        exporter.export_item(item)
-
     def _get_file(self, item_cls):
         classname = item_cls.__name__
         camelcase_name = classname.lower().replace('item', '')
@@ -162,12 +170,14 @@ class SplitExportersPipline:
         return self.item_class_exporter[item_cls]
 
     def process_item(self, item, spider):
-        if not isinstance(item, scrapy.Item):
+        adapter = ItemAdapter(item)
+        if not adapter.is_item(item) or not isinstance(item, scrapy.Item):
+            logger.warn('NOT ITEM %s', item)
             return item
 
         item_cls = item.__class__
         exporter = self._get_exporter(item_cls)
-        self._export_item(item, exporter)
+        exporter.export_item(item)
 
 
 class UniqueItemsPipline:
