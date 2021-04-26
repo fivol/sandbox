@@ -2,7 +2,7 @@
 .idea/
 data/
 .log
-
+*xv4*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

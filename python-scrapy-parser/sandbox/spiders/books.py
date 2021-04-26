@@ -3,26 +3,18 @@ from scrapy.http import request
 from scrapy.loader import ItemLoader
 from sandbox.items import *
 from sandbox import pipelines
+from sandbox.pipelines import merge_dicts
 from scrapy.exporters import JsonItemExporter, CsvItemExporter
-
+from sandbox.utils import generate_settings
 
 class BooksSpider(scrapy.Spider):
     name = 'books'
     allowed_domains = ['books.toscrape.com']
 
     custom_settings = {
-        'ITEM_PIPELINES': {
-            'sandbox.pipelines.CleanItemPipline': 100,
-            'sandbox.pipelines.UniqueItemsPipline': 200,
-            'sandbox.pipelines.SplitExportersPipline': 300,
-        },
-        'PRIMARY_KEYS': {
-            BookItem: 'name',
-            CategoryItem: 'name',
-        },
-        'FEEDS_SPLITTER': {
+        'SPLIT_EXPORTERS_PIPELINE': {
             'exporter': JsonItemExporter,
-            'folder': 'data/books_parser/json',
+            'folder': 'data/books/json',
             'extension': 'json',
             'settings': {
                 'indent': 4,
@@ -31,8 +23,9 @@ class BooksSpider(scrapy.Spider):
         # 'CLOSESPIDER_PAGECOUNT': 4,
         'LOG_LEVEL': 'WARNING',
         # This is set for testing!!!! Comment out paramener to parse all
-        'DEPTH_LIMIT': 2
-
+        'DEPTH_LIMIT': 2,
+        'HTTPCACHE_ENABLED': True,
+        'IMAGES_STORE': 'data/books/images'
     }
 
     def start_requests(self):
@@ -43,11 +36,19 @@ class BooksSpider(scrapy.Spider):
         info_rows = response.css('table.table tr')
         from scrapy.shell import inspect_response
         # inspect_response(response, self)
+        rating_dict = {
+            'One': 1,
+            'Two': 2,
+            'Three': 3,
+            'Four': 4,
+            'Five': 5
+        }
+        rating_class = response.css('p.star-rating::attr(class)').get().split()[-1]
         yield BookItem(
             name=response.css('div.product_main h1::text').get(),
-            img=response.urljoin(response.css('div.item img::attr(href)').get()),
+            image_urls=[response.urljoin(response.css('div.item img::attr(src)').get())],
             price=response.css('p.price_color::text').get(),
-            rating=len(response.css('p.star-rating i.icon-star').getall()),
+            rating=rating_dict.get(rating_class),
             description=response.css('div#product_description ~ p::text').get(),
             information={
                 row.css('th::text').get(): row.css('td::text').get() 
@@ -64,9 +65,9 @@ class BooksSpider(scrapy.Spider):
             for url in books
         ], callback=self.parse_book_page, cb_kwargs={'category': category})
         
-        # next_page = response.urljoin(response.css('li.next a::attr(href)').get())
-        # if next_page:
-        #     yield scrapy.Request(next_page, callback=self.parse_category_books)
+        next_page = response.urljoin(response.css('li.next a::attr(href)').get())
+        if next_page:
+            yield scrapy.Request(next_page, callback=self.parse_category_books)
 
     def parse_categories(self, response):
         categories = response.css('ul li ul li a')

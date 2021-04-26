@@ -6,11 +6,12 @@
 
 # useful for handling different item types with a single interface
 # from itemadapter import ItemAdapter
+from typing import Type
 import scrapy
 import sqlalchemy
 from sandbox.models import Session, Author, Quote
 import re
-from itemadapter import ItemAdapter
+from itemadapter import ItemAdapter, adapter
 from scrapy.crawler import Crawler
 from scrapy.exporters import BaseItemExporter
 import os
@@ -19,14 +20,11 @@ import logging
 import inflection
 from collections import defaultdict
 from scrapy.exceptions import DropItem
+from scrapy.pipelines.images import ImagesPipeline
+from sandbox.utils import *
+from typing import List
 
 logger = logging.getLogger('mycustomlogger')
-
-
-def create_folders(dirspath):
-    """Creates nested folders"""
-    if not Path(dirspath).exists():
-        os.makedirs(dirspath)
 
 
 class SandboxPipeline:
@@ -55,27 +53,48 @@ class SqlitePipeline:
 class CleanItemPipline:
     """This pipeline prepares every field in Item
         How to use it?
-        ...
-        name = scrapy.Field(strip=True, int=False, extract_number=True)
-        ....
+        class QuoteItem(scrapy.Item):
+            ...
+            name = scrapy.Field(strip=True, int=False, extract_number=True)
+            ....
         Avaliable parameters:
+
         strip (default True) - remove space symbols from begin and end of string
-    
+        extract (default None): 
+            'int' - extract integer number from string
+            'float' - extract float point number from string
+            r'<regex>' - re.search(r'<regex>', value)
+        cast (default None) - transform value to proper type. For example int(value)
     """
+
+    default_args = {
+        'strip': True,
+        'extract': None,
+        'cast': None
+    }
 
     @staticmethod
     def _handle_field(value, **kwargs):
         for func, arg in kwargs.items():
-            if func == 'strip' and arg:
-                value = value.strip()
+            if not arg:
+                continue
+
+            if func == 'strip':
+                if isinstance(value, str):
+                    value = value.strip()
+                if isinstance(value, List[str]):
+                    value = map(lambda x: x.strip(), value)
+
             if func == 'extract':
                 extract_schema = {
                     'int': r'\d+',
-                    'float': r'\d+(\.|,)\d',
+                    'float': r'\d+((\.|,)\d+)?',
                 }
                 schema = extract_schema.get(arg)
-                if schema:
-                    value = re.search(schema, value).group(0)
+                if not schema:
+                    schema = arg
+                value = re.search(schema, value).group(0)
+
             if func == 'cast':
                 value = arg(value)
 
@@ -84,12 +103,12 @@ class CleanItemPipline:
     def process_item(self, item, spider):
         adapter = ItemAdapter(item)
         for field in adapter.field_names():
-            meta = adapter.get_field_meta(field)
+            meta = adapter.get_field_meta(field) or self.default_args
             value = adapter.get(field)
             try:
                 adapter[field] = self._handle_field(value, **meta)
             except:
-                logger.warn('Fail to prepare field: %s, value: %s', field, value)
+                logger.warn('Fail to prepare field %s, value: %s', field, value)
 
         return adapter.item
 
@@ -101,7 +120,7 @@ class SplitExportersPipline:
 
     from scrapy.exporters import JsonItemExporter 
 
-    'FEEDS_SPLITTER': {
+    'SPLIT_EXPORTERS_PIPELINE': {
         'exporter': JsonItemExporter,
         'folder': 'data/quotes_parser',
         'extension': 'json',
@@ -111,7 +130,7 @@ class SplitExportersPipline:
         }
     }
 
-    and do not forget specify
+    and do not forget to specify
 
     'ITEM_PIPELINES': {
         ...
@@ -124,7 +143,10 @@ class SplitExportersPipline:
     """
 
     def __init__(self, exporter=None, settings: dict = None,
-                 folder: str = '', extension: str = ''):
+                 folder: str = '', extension: str = '', ignore_pipeline=True):
+        self.ignore_pipeline = ignore_pipeline
+        if ignore_pipeline:
+            return
         self.exporter_cls = exporter
         self.settings = settings
         if not settings:
@@ -138,13 +160,17 @@ class SplitExportersPipline:
 
     @classmethod
     def from_crawler(cls, crawler: Crawler):
-        print('crawler')
-        return cls(**crawler.settings.get('FEEDS_SPLITTER'))
+        pipeline_settings = crawler.settings.get('SPLIT_EXPORTERS_PIPELINE')
+        if not pipeline_settings:
+            return cls()
+        return cls(**pipeline_settings, ignore_pipeline=False)
 
     def open_spider(self, spider):
         pass
 
     def close_spider(self, spider):
+        if self.ignore_pipeline:
+            return
         for cls in self.item_class_exporter:
             file = self.item_class_file[cls]
             exporter = self.item_class_exporter[cls]
@@ -170,6 +196,8 @@ class SplitExportersPipline:
         return self.item_class_exporter[item_cls]
 
     def process_item(self, item, spider):
+        if self.ignore_pipeline:
+            return item
         adapter = ItemAdapter(item)
         if not adapter.is_item(item) or not isinstance(item, scrapy.Item):
             logger.warn('NOT ITEM %s', item)
@@ -181,51 +209,42 @@ class SplitExportersPipline:
 
 
 class UniqueItemsPipline:
-    """Removes all not uniqu items from items stream
-        Works only with Items (not dicts)
-        You have to set setting like this
-        'PRIMARY_KEYS': {
-            QuoteAuthorItem: ['name', 'sername'],
-            TagItem: 'name',
-            QuoteItem: 'quote'
-        },
-        where 
-        QuoteAuthorItem is Item object
+    """Removes all not unique items from items stream
+        Works only with Items class (not dicts etc)
+        You have to set Field metadate primary_key=True
+
+        class TagItem(scrapy.Item):
+            name = scrapy.Field(primary_key=True)
+            description = scrapy.Field()
+
+        Then this field will be unique in output.
+        Duplicates will be removed.
+        There may be several fields with primary_key option
     """
 
     def __init__(self, primary_keys: dict = None):
-        self.primary_keys = self._normalize_primary_keys(primary_keys)
         self.keys_seen = defaultdict(set)
-        logger.debug("PRIMARY KEYS %s", self.primary_keys)
         super().__init__()
 
-    def _normalize_primary_keys(self, primary_keys):
-        if not primary_keys:
-            return {}
+    def _item_hash(self, item, keys):
+        key_values = map(lambda key: str(item[key]), keys)
+        return hash('.'.join(key_values))
 
-        return {
-            item_cls: [key] if isinstance(key, str) else key
-            for item_cls, key in (primary_keys.items() or [])
-        }
-
-    @classmethod
-    def from_crawler(cls, crawler):
-        settings = crawler.settings
-        return cls(primary_keys=settings.get('PRIMARY_KEYS'))
-
-    def _item_hash(self, item):
-        keys_names = self.primary_keys.get(item.__class__)
-        keys_values = map(lambda key: str(item[key]), keys_names)
-        return hash('.'.join(keys_values))
+    @staticmethod
+    def _get_primary_keys(adapter):
+        return [
+            key for key in adapter.keys()
+            if adapter.get_field_meta(key).get('primary_key')
+        ]
 
     def process_item(self, item, spider):
         if not isinstance(item, scrapy.Item):
             return item
+        adapter = ItemAdapter(item)
         item_cls = item.__class__
-        if item_cls not in self.primary_keys:
-            return item
+        primary_keys = self._get_primary_keys(adapter)
 
-        item_hash = self._item_hash(item)
+        item_hash = self._item_hash(item, primary_keys)
         if item_hash in self.keys_seen[item_cls]:
             logging.debug('Drop item %s', item)
             raise DropItem(f"Duplicate item found: {item!r}")
