@@ -1,0 +1,2 @@
+- '{\w+:level}:\s+{ip} - "{\w+:method} {[^?]*:url.path}\??{\S*:params}" {[^"]+:protocol}"'
+-

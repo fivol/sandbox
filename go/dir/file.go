@@ -1,0 +1,5 @@
+package dir
+
+func A() {
+
+}

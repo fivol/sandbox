@@ -1,0 +1,9 @@
+version: '3.9'
+
+services:
+  producer:
+    image: test_v4
+    logging:
+      driver: gelf
+      options:
+        gelf-address: udp://0.0.0.0:12201

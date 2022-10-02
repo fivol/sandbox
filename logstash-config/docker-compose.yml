@@ -1,0 +1,10 @@
+version: "3.7"
+
+services:
+  logstash:
+    image: docker.elastic.co/logstash/logstash:7.17.0
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro,z
+      - ./output:/home/logstash
+    ports:
+      - "5556:5556"

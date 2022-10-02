@@ -1,0 +1,15 @@
+{
+  "level": "INFO",
+  "ip": "10.0.42.4:45942",
+  "method": "POST",
+  "url": {
+    "path": "/api/last_deviation_check",
+    "params": "token=eThszayJUu3SqpLLHcDE&ts=1645275540"
+  },
+  "protocol": "HTTP/1.1",
+  "status_code": 200,
+  "status": {
+    "code": 200,
+    "name": "OK"
+  }
+}
